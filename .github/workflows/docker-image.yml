@@ -5,6 +5,7 @@ name: Create and publish a Docker image
 # - A tag starting with "v" is created
 # - A pull request is created or updated
 on:
+  workflow_dispatch:
   push:
     tags: ["*"]
 env:
