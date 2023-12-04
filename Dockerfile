@@ -1,6 +1,6 @@
 FROM rust:1.74-slim AS builder
 WORKDIR /src
-COPY Cargo.toml Cargo.lock .
+COPY Cargo.toml .
 COPY src ./src
 RUN rustup target add x86_64-unknown-linux-musl
 RUN cargo build --target x86_64-unknown-linux-musl --release
