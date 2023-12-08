@@ -30,7 +30,7 @@ impl Handler for WSHandler {
             let (name, data) = h;
             if name == "X-Token" {
                 let sp: Vec<Vec<u8>> = data
-                    .split(|&v| v == 44)
+                    .chunks(32) 
                     .map(|chunk| chunk.to_vec())
                     .collect();
 
