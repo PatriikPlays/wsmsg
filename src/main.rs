@@ -361,14 +361,28 @@ fn main() {
     };
 
     let listen_host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    
     let listen_addr = format!("{}:{}", listen_host, port);
 
     println!("Listening on {}", &listen_addr);
-    if let Err(error) = listen(&listen_addr, |out| WSHandler {
-        out: out,
-        channels: vec![]
-    }) {
-        println!("Failed to listen: {:?}", error);
+
+    let server = ws::Builder::new()
+        .with_settings(ws::Settings {
+            max_connections: 32768, // Increase from default 100
+            ..Default::default()
+        })
+        .build(|out| WSHandler {
+            out,
+            channels: vec![],
+        });
+
+    match server {
+        Ok(srv) => {
+            if let Err(error) = srv.listen(listen_addr) {
+                eprintln!("Failed to listen: {:?}", error);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to build WS server: {:?}", e);
+        }
     }
 }
