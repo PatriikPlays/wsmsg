@@ -3,26 +3,25 @@ mod util;
 use std::{collections::HashMap, sync::{Arc, RwLock}, vec};
 use std::mem::drop;
 
-
 use lazy_static::lazy_static;
-use rand::{SeedableRng, Rng};
-use rand_hc::Hc128Rng;
+use rand_core::Rng;
+use tracing::{error, info};
 use util::*;
-use ws::{listen, Handler, Handshake, Sender, Response};
+use ws::{Handler, Handshake, Sender, Response};
 
 struct WSHandler {
     out: Sender,
-    channels: Vec<Vec<u8>>
+    channels: Vec<Vec<u8>>,
+    max_channels: usize,
 }
 
 lazy_static! {
     static ref SUBSCRIPTIONS: Arc<RwLock<HashMap<Vec<u8>, Vec<Sender>>>> = Arc::new(RwLock::new(HashMap::new()));
-    static ref RNG: Arc<RwLock<Hc128Rng>> = Arc::new(RwLock::new(Hc128Rng::from_entropy()));
 }
 
 impl Handler for WSHandler {
     fn on_open(&mut self, _shake: Handshake) -> ws::Result<()> {
-        println!("WS connection {} opened", self.out.connection_id());
+        info!("WS connection {} opened", self.out.connection_id());
         
         let headers = _shake.request.headers();
 
@@ -36,7 +35,7 @@ impl Handler for WSHandler {
 
                 sp.iter().for_each(|token| {
                     if token.len() == 32 {
-                        if self.channels.len() < 32 {
+                        if self.channels.len() < self.max_channels {
                             self.channels.push(token.clone());
                         }
                     }
@@ -64,35 +63,10 @@ impl Handler for WSHandler {
         return Ok(());
     }
 
-    fn on_close(&mut self, _code: ws::CloseCode, _reason: &str) {
-        println!("WS connection {} closed", self.out.connection_id());
-
-        if self.channels.len() > 0 {
-            let mut s = SUBSCRIPTIONS.write().unwrap();
-
-            self.channels.iter().for_each(|ch| {
-                if s.contains_key(ch) {
-                    let v = s.get_mut(ch).unwrap();
-
-                    v.retain(|x| x.connection_id() != self.out.connection_id());
-
-                    if v.len() == 0 {
-                        s.remove(ch);
-                    }
-                }
-            });
-
-            drop(s);
-        }
-    }
-
     fn on_message(&mut self, msg: ws::Message) -> ws::Result<()> {
         if msg.is_binary() {
             let parsed_msg = WSMSGMessage::from_message(msg.into_data());
 
-            /*unsafe {
-                println!("Theyer angry!! id:{} type:{} data:{}", parsed_msg.clone().unwrap().message_id, parsed_msg.clone().unwrap().message_type, String::from_utf8_unchecked(parsed_msg.clone().unwrap().message_data));
-            }*/
             match parsed_msg {
                 Ok(v) => match v.message_type {
                     WSMSGMessageTypeC2S::Message => {
@@ -100,7 +74,7 @@ impl Handler for WSHandler {
                             if v.message_id == 0 {
                                 return Ok(());
                             }
-    
+
                             let mut response_data: Vec<u8> = vec![];
                             response_data.extend_from_slice(WSMSGMessageError::MessageMalformed.to_string().as_bytes());
 
@@ -126,7 +100,7 @@ impl Handler for WSHandler {
                                         message_id: None,
                                         message_code: None,
                                         message_data: v.message_data.clone()
-                                    })).unwrap();    
+                                    })).unwrap();
                                 }
                             });
                         }
@@ -169,7 +143,7 @@ impl Handler for WSHandler {
                         }));
                     }
                     WSMSGMessageTypeC2S::Subscribe => {
-                        if v.message_data.len() != 32 {
+                        if self.channels.len() >= self.max_channels {
                             if v.message_id == 0 {
                                 return Ok(());
                             }
@@ -195,8 +169,21 @@ impl Handler for WSHandler {
                             }));
                         }
 
+                        if self.channels.len() >= 32 {
+                            if v.message_id == 0 {
+                                return Ok(());
+                            }
+
+                            return self.out.send(WSMSGResponse::to_message(&WSMSGResponse {
+                                message_type: WSMSGMessageTypeS2C::Reply,
+                                message_id: Some(v.message_id),
+                                message_code: Some(1),
+                                message_data: Vec::from("Too many channels".as_bytes())
+                            }));
+                        }
+
                         self.subscribe(v.message_data);
-                        
+
                         if v.message_id == 0 {
                             return Ok(());
                         }
@@ -236,7 +223,7 @@ impl Handler for WSHandler {
                         }
 
                         self.unsubscribe(v.message_data);
-                        
+
                         if v.message_id == 0 {
                             return Ok(());
                         }
@@ -266,21 +253,44 @@ impl Handler for WSHandler {
         return Ok(());
     }
 
+    fn on_close(&mut self, _code: ws::CloseCode, _reason: &str) {
+        info!("WS connection {} closed", self.out.connection_id());
+
+        if self.channels.len() > 0 {
+            let mut s = SUBSCRIPTIONS.write().unwrap();
+
+            self.channels.iter().for_each(|ch| {
+                if s.contains_key(ch) {
+                    let v = s.get_mut(ch).unwrap();
+
+                    v.retain(|x| x.connection_id() != self.out.connection_id());
+
+                    if v.len() == 0 {
+                        s.remove(ch);
+                    }
+                }
+            });
+
+            drop(s);
+        }
+    }
+
     fn on_request(&mut self, req: &ws::Request) -> ws::Result<ws::Response> {
+        info!(
+            "{} {}",
+            req.method(),
+            req.resource()
+        );
+
         match req.resource() {
             "/ws" => {
                 return Response::from_request(req);
             }
             "/csprng" => {
-                let mut data: Vec<u8> = vec![];
+                let mut buf = [0u8; 32];
+                rand::rng().fill_bytes(&mut buf);
 
-                let mut rng = RNG.write().unwrap();
-                for _ in 0..32 {
-                    data.push(rng.gen());
-                }
-                drop(rng);
-                
-                return Ok(Response::new(200, "OK", data));
+                return Ok(Response::new(200, "OK", buf.to_vec()));
             }
             _ => {
                 if req.resource().starts_with("/ws/") {
@@ -329,7 +339,7 @@ impl WSHandler {
             let mut s = SUBSCRIPTIONS.write().unwrap();
 
             if !s.contains_key(&channel) {
-                eprintln!("Inconsistent state, handler was listening on channel, but the channel was not found in the subscriptions map");
+                error!("Inconsistent state, handler was listening on channel, but the channel was not found in the subscriptions map");
                 self.channels.remove(to_remove);
                 return;
             }
@@ -351,11 +361,13 @@ impl WSHandler {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let port_str = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let port = match port_str.parse::<u16>() {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("Invalid port: {}", e);
+            error!("Invalid port: {}", e);
             std::process::exit(1);
         },
     };
@@ -363,26 +375,45 @@ fn main() {
     let listen_host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let listen_addr = format!("{}:{}", listen_host, port);
 
-    println!("Listening on {}", &listen_addr);
+    let max_connections_str = std::env::var("MAX_CONNECTIONS").unwrap_or_else(|_| "8192".to_string());
+    let max_connections = match max_connections_str.parse::<usize>() {
+        Ok(x) => x,
+        Err(e) => {
+            error!("Invalid max_connections: {}", e);
+            std::process::exit(1);
+        },
+    };
+
+    let max_channels_str = std::env::var("MAX_CHANNELS_PER_CONN").unwrap_or_else(|_| "32".to_string());
+    let max_channels = match max_channels_str.parse::<usize>() {
+        Ok(x) => x,
+        Err(e) => {
+            error!("Invalid MAX_CHANNELS_PER_CONN: {}", e);
+            std::process::exit(1);
+        },
+    };
+
+    info!("Listening on {}, ws connection limit is {}, max channels per connection is {}", &listen_addr, max_connections, max_channels);
 
     let server = ws::Builder::new()
         .with_settings(ws::Settings {
-            max_connections: 32768, // Increase from default 100
+            max_connections,
             ..Default::default()
         })
         .build(|out| WSHandler {
             out,
             channels: vec![],
+            max_channels,
         });
 
     match server {
         Ok(srv) => {
             if let Err(error) = srv.listen(listen_addr) {
-                eprintln!("Failed to listen: {:?}", error);
+                error!("Failed to listen: {:?}", error);
             }
         }
         Err(e) => {
-            eprintln!("Failed to build WS server: {:?}", e);
+            error!("Failed to build WS server: {:?}", e);
         }
     }
 }
